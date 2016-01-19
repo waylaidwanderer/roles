@@ -4,6 +4,7 @@ namespace Bican\Roles\Traits;
 
 use Illuminate\Support\Str;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Collection;
 use InvalidArgumentException;
 
 trait HasRoleAndPermission
@@ -165,9 +166,9 @@ trait HasRoleAndPermission
         }
 
         return $permissionModel::select(['permissions.*', 'permission_role.created_at as pivot_created_at', 'permission_role.updated_at as pivot_updated_at'])
-                ->join('permission_role', 'permission_role.permission_id', '=', 'permissions.id')->join('roles', 'roles.id', '=', 'permission_role.role_id')
-                ->whereIn('roles.id', $this->getRoles()->lists('id')->toArray()) ->orWhere('roles.level', '<', $this->level())
-                ->groupBy(['permissions.id', 'pivot_created_at', 'pivot_updated_at']);
+            ->join('permission_role', 'permission_role.permission_id', '=', 'permissions.id')->join('roles', 'roles.id', '=', 'permission_role.role_id')
+            ->whereIn('roles.id', $this->getRoles()->lists('id')->toArray()) ->orWhere('roles.level', '<', $this->level())
+            ->groupBy(['permissions.id', 'pivot_created_at', 'pivot_updated_at']);
     }
 
     /**
@@ -177,7 +178,7 @@ trait HasRoleAndPermission
      */
     public function userPermissions()
     {
-        return $this->belongsToMany(config('roles.models.permission'))->withTimestamps();
+        return $this->belongsToMany(config('roles.models.permission'))->withTimestamps()->withPivot('granted');
     }
 
     /**
@@ -187,7 +188,22 @@ trait HasRoleAndPermission
      */
     public function getPermissions()
     {
-        return (!$this->permissions) ? $this->permissions = $this->rolePermissions()->get()->merge($this->userPermissions()->get()) : $this->permissions;
+        if(!$this->permissions){
+            $rolePermissions = $this->rolePermissions()->get();
+            $userPermissions = $this->userPermissions()->get();
+            $deniedPermissions = new Collection();
+            foreach($userPermissions as $key => $permission){
+                if(!$permission->pivot->granted && $rolePermissions->contains($permission)){
+                    $deniedPermissions->push($permission);
+                }
+            }
+            $permissions = $rolePermissions->merge($userPermissions);
+            $this->permissions = $permissions->filter(function($permission) use ($deniedPermissions)
+            {
+                return !$deniedPermissions->contains($permission);
+            });
+        }
+        return $this->permissions;
     }
 
     /**
@@ -299,11 +315,20 @@ trait HasRoleAndPermission
      * Attach permission to a user.
      *
      * @param int|\Bican\Roles\Models\Permission $permission
-     * @return null|bool
+     * @param bool $granted
+     * @return bool
      */
-    public function attachPermission($permission)
+    public function attachPermission($permission, $granted = true)
     {
-        return (!$this->getPermissions()->contains($permission)) ? $this->userPermissions()->attach($permission) : true;
+        if ($this->userPermissions()->get()->contains($permission)) {
+            $permission = $this->userPermissions()->get()->find($permission);
+            $permission->pivot->granted = (int) $granted;
+            $permission->pivot->save();
+        } else {
+            $this->userPermissions()->attach($permission, ['granted' => $granted]);
+        }
+
+        return true;
     }
 
     /**
@@ -327,7 +352,7 @@ trait HasRoleAndPermission
     public function detachAllPermissions()
     {
         $this->permissions = null;
-        
+
         return $this->userPermissions()->detach();
     }
 
